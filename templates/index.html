@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<title>Battle Tetris Online</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+<style>
+  body { background: #111; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; min-height: 100vh; margin: 0; }
+  
+  /* 画面切り替え用 */
+  .screen { display: none; width: 100%; max-width: 800px; text-align: center; padding: 20px; }
+  .active { display: block; }
+
+  /* UI要素 */
+  input, button { padding: 10px; font-size: 16px; margin: 5px; }
+  button { cursor: pointer; background: #444; color: #fff; border: 1px solid #666; }
+  button:hover { background: #666; }
+  .room-code { font-size: 2em; font-weight: bold; color: #0ff; letter-spacing: 5px; }
+  
+  /* ゲームレイアウト */
+  #gameContainer { display: flex; justify-content: center; gap: 20px; }
+  #game { display: grid; grid-template-rows: repeat(20, 24px); grid-template-columns: repeat(10, 24px); background:#222; border: 2px solid #555; position: relative; }
+  .cell { width:24px; height:24px; box-sizing:border-box; border:1px solid #333; }
+  .ghost { background: rgba(255, 255, 255, 0.2) !important; border: 1px solid #fff !important; }
+  
+  #hold, .next-box {
+    width: 80px; height: 80px; background:#222; display:grid;
+    grid-template: repeat(4,20px) / repeat(4,20px); margin-bottom: 10px;
+    border: 1px solid #444;
+  }
+  .mini { width:20px; height:20px; border:1px solid #333; box-sizing:border-box; }
+
+  #leftPanel, #rightPanel { width: 120px; display: flex; flex-direction: column; align-items: center; }
+  
+  /* 観戦・ステータス */
+  #statusMessage { font-size: 1.2em; color: #f00; margin-bottom: 10px; min-height: 1.5em;}
+  #spectatorView { display: none; margin-top: 20px; border: 1px solid #444; padding: 10px; }
+  
+  /* ランキング */
+  ol { text-align: left; display: inline-block; }
+  li { font-size: 1.2em; margin: 5px; }
+</style>
+</head>
+<body>
+
+<div id="loginScreen" class="screen active">
+    <h1>Battle Tetris Online</h1>
+    <input type="text" id="playerName" placeholder="プレイヤー名" maxlength="10">
+    <div style="margin-top:20px;">
+        <button onclick="createRoom()">ルーム作成</button>
+        <div style="margin: 10px;">または</div>
+        <input type="text" id="roomCodeInput" placeholder="ルームID (例: 12AB)" maxlength="4" style="text-transform: uppercase;">
+        <button onclick="joinRoom()">ルーム参加</button>
+    </div>
+</div>
+
+<div id="lobbyScreen" class="screen">
+    <h2>ルーム待機中</h2>
+    <div>ルームID: <span id="displayRoomId" class="room-code">----</span></div>
+    <div style="margin: 20px 0;">
+        <h3>参加者一覧</h3>
+        <ul id="playerList" style="list-style: none; padding: 0;"></ul>
+    </div>
+    <div id="hostControls" style="display:none;">
+        <button onclick="startGame()">ゲーム開始</button>
+    </div>
+    <div id="waitMessage" style="display:none;">ホストが開始するのを待っています...</div>
+</div>
+
+<div id="gameScreen" class="screen">
+    <div id="statusMessage"></div>
+    <div id="gameContainer">
+        <div id="leftPanel">
+            <div>HOLD</div>
+            <div id="hold"></div>
+            <div style="margin-top:20px; color:#f88;">Garbage</div>
+            <div id="garbageCount" style="font-size:24px; font-weight:bold;">0</div>
+        </div>
+
+        <div id="game"></div>
+
+        <div id="rightPanel">
+            <div>NEXT</div>
+            <div id="next1" class="next-box"></div>
+            <div id="next2" class="next-box"></div>
+            <div id="next3" class="next-box"></div>
+        </div>
+    </div>
+    <div id="spectatorView">
+        <h3>観戦中: <span id="spectatingName">---</span></h3>
+        </div>
+</div>
+
+<div id="resultScreen" class="screen">
+    <h1>GAME SET</h1>
+    <h2>ランキング</h2>
+    <ol id="rankingList"></ol>
+    <button onclick="backToLobby()">ロビーに戻る</button>
+</div>
+
+<script>
+const socket = io();
+
+// ====== 状態管理 ======
+let myRoomId = null;
+let isHost = false;
+let myName = "";
+let isPlaying = false;
+let isSpectating = false;
+let gameInterval = null;
+
+// UI切り替え
+function showScreen(id){
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+}
+
+// ====== 通信関連 ======
+function createRoom(){
+    myName = document.getElementById('playerName').value || "NoName";
+    socket.emit('create_room', {name: myName});
+}
+
+function joinRoom(){
+    myName = document.getElementById('playerName').value || "NoName";
+    const rid = document.getElementById('roomCodeInput').value;
+    socket.emit('join_room', {name: myName, roomId: rid});
+}
+
+function startGame(){
+    socket.emit('start_game', {roomId: myRoomId});
+}
+
+function backToLobby(){
+    showScreen('lobbyScreen');
+}
+
+socket.on('room_created', (data) => {
+    myRoomId = data.roomId;
+    isHost = true;
+    document.getElementById('displayRoomId').innerText = myRoomId;
+    document.getElementById('hostControls').style.display = 'block';
+    document.getElementById('waitMessage').style.display = 'none';
+    showScreen('lobbyScreen');
+});
+
+socket.on('room_joined', (data) => {
+    myRoomId = data.roomId;
+    isHost = false;
+    document.getElementById('displayRoomId').innerText = myRoomId;
+    document.getElementById('hostControls').style.display = 'none';
+    document.getElementById('waitMessage').style.display = 'block';
+    showScreen('lobbyScreen');
+});
+
+socket.on('update_lobby', (data) => {
+    const list = document.getElementById('playerList');
+    list.innerHTML = "";
+    data.players.forEach(p => {
+        const li = document.createElement('li');
+        li.textContent = p;
+        list.appendChild(li);
+    });
+});
+
+socket.on('error', (data) => { alert(data.msg); });
+
+socket.on('game_start', () => {
+    initGame();
+    showScreen('gameScreen');
+    document.getElementById('statusMessage').textContent = "";
+    document.getElementById('spectatorView').style.display = 'none';
+});
+
+socket.on('receive_garbage', (data) => {
+    if(isPlaying && !isSpectating){
+        queueGarbage(data.amount);
+    }
+});
+
+socket.on('spectate_mode', () => {
+    isSpectating = true;
+    isPlaying = false;
+    clearInterval(gameInterval);
+    document.getElementById('statusMessage').textContent = "GAME OVER - 観戦中";
+    document.getElementById('statusMessage').style.color = "#f00";
+    document.getElementById('spectatorView').style.display = 'block';
+});
+
+// 観戦データ受信
+socket.on('spectator_update', (data) => {
+    if(isSpectating && data.id !== socket.id){
+        // 誰か一人の画面を表示（簡易的に最後にデータが来た人を表示）
+        document.getElementById('spectatingName').innerText = data.name;
+        renderSpectatorGrid(data.grid);
+    }
+});
+
+socket.on('game_over', (data) => {
+    isPlaying = false;
+    isSpectating = false;
+    clearInterval(gameInterval);
+    showScreen('resultScreen');
+    
+    const list = document.getElementById('rankingList');
+    list.innerHTML = "";
+    data.ranking.forEach((name, i) => {
+        const li = document.createElement('li');
+        li.textContent = `${i+1}位: ${name}`;
+        list.appendChild(li);
+    });
+});
+
+
+// ====== ゲームロジック (Tetris) ======
+const ROW = 20, COL = 10;
+const gameDiv = document.getElementById("game");
+const holdBox = document.getElementById("hold");
+let field = [];
+const TETROS = {
+  I: [[1,1,1,1]], O: [[1,1],[1,1]], T: [[1,1,1],[0,1,0]],
+  S: [[0,1,1],[1,1,0]], Z: [[1,1,0],[0,1,1]], J: [[1,0,0],[1,1,1]], L: [[0,0,1],[1,1,1]]
+};
+const COLORS = {I:"#0ff",O:"#ff0",T:"#a0f",S:"#0f0",Z:"#f00",J:"#00f",L:"#fa0"};
+
+let bag = [], cur = null, nextQueue = [], hold = null, holdUsed = false;
+let garbageQueue = 0;
+
+// グリッド初期化
+gameDiv.innerHTML = "";
+for(let r=0;r<ROW;r++){
+    for(let c=0;c<COL;c++){
+        const div=document.createElement("div");
+        div.className="cell";
+        div.id=`cell-${r}-${c}`;
+        gameDiv.appendChild(div);
+    }
+}
+
+function initGame(){
+    field = Array.from({length:ROW},()=>Array(COL).fill(0));
+    bag = [];
+    nextQueue = [getNext(), getNext(), getNext(), getNext(), getNext()];
+    hold = null;
+    holdUsed = false;
+    garbageQueue = 0;
+    document.getElementById('garbageCount').innerText = 0;
+    isPlaying = true;
+    isSpectating = false;
+    
+    cur = getNext();
+    draw();
+    if(gameInterval) clearInterval(gameInterval);
+    gameInterval = setInterval(gameLoop, 1000); // 落下速度
+}
+
+function refillBag(){ bag = Object.keys(TETROS).sort(()=>Math.random()-0.5); }
+function getNext(){
+    if(bag.length===0) refillBag();
+    const type = bag.pop();
+    return { type, shape: TETROS[type].map(r=>[...r]), row:0, col:3 };
+}
+
+function rotate(shape, dir){
+    const N = shape.length, M = shape[0].length;
+    let res = Array.from({length:M},()=>Array(N).fill(0));
+    for(let r=0;r<N;r++) for(let c=0;c<M;c++){
+        if(dir>0) res[c][N-1-r] = shape[r][c];
+        else res[M-1-c][r] = shape[r][c];
+    }
+    return res;
+}
+
+function collision(t){
+    const sh=t.shape;
+    for(let r=0;r<sh.length;r++) for(let c=0;c<sh[0].length;c++){
+        if(!sh[r][c]) continue;
+        let nr = t.row+r, nc = t.col+c;
+        if(nr<0||nr>=ROW||nc<0||nc>=COL || field[nr][nc]) return true;
+    }
+    return false;
+}
+
+function getGhostRow(t){
+    let ghostRow = t.row;
+    while(!collision({...t, row: ghostRow + 1})) ghostRow++;
+    return ghostRow;
+}
+
+function lock(){
+    const sh=cur.shape;
+    for(let r=0;r<sh.length;r++) for(let c=0;c<sh[0].length;c++){
+        if(sh[r][c]) field[cur.row+r][cur.col+c] = COLORS[cur.type];
+    }
+    
+    // ライン消去確認
+    let cleared = 0;
+    for(let r=ROW-1;r>=0;r--){
+        if(field[r].every(v=>v)){
+            field.splice(r,1);
+            field.unshift(Array(COL).fill(0));
+            cleared++;
+            r++;
+        }
+    }
+    
+    // 攻撃送信
+    if(cleared > 1){
+        socket.emit('send_garbage', {roomId: myRoomId, lines: cleared});
+    }
+
+    // お邪魔ブロック受け取り処理 (ライン消去が発生しなかったターンに処理する、あるいは即時)
+    // ここではライン消去後にスペースがあれば入れる実装
+    if(garbageQueue > 0){
+        addGarbageToField(garbageQueue);
+        garbageQueue = 0;
+        document.getElementById('garbageCount').innerText = 0;
+    }
+
+    cur = nextQueue.shift();
+    nextQueue.push(getNext());
+    holdUsed = false;
+
+    if(collision(cur)){
+        // 死亡
+        isPlaying = false;
+        socket.emit('player_died', {roomId: myRoomId});
+        return;
+    }
+    
+    // 盤面更新を送信 (観戦用)
+    sendBoardUpdate();
+}
+
+function queueGarbage(amount){
+    garbageQueue += amount;
+    document.getElementById('garbageCount').innerText = garbageQueue;
+}
+
+function addGarbageToField(amount){
+    const hole = Math.floor(Math.random()*COL);
+    for(let i=0;i<amount;i++){
+        if(field[0].some(v=>v)) { // 天井に達したら死亡
+            isPlaying = false;
+            socket.emit('player_died', {roomId: myRoomId});
+            return;
+        }
+        field.shift();
+        const row = Array(COL).fill("#555");
+        row[hole] = 0;
+        field.push(row);
+    }
+}
+
+function sendBoardUpdate(){
+    // フィールドと現在のミノを合成した簡易グリッドを送る
+    let displayField = JSON.parse(JSON.stringify(field));
+    const sh = cur.shape;
+    for(let r=0;r<sh.length;r++) for(let c=0;c<sh[0].length;c++){
+        if(sh[r][c] && cur.row+r < ROW && cur.row+r >= 0){
+            displayField[cur.row+r][cur.col+c] = COLORS[cur.type];
+        }
+    }
+    socket.emit('update_board', {roomId: myRoomId, grid: displayField});
+}
+
+// 観戦者用の描画
+function renderSpectatorGrid(gridData){
+    for(let r=0;r<ROW;r++) for(let c=0;c<COL;c++){
+        const cell = document.getElementById(`cell-${r}-${c}`);
+        cell.className = "cell";
+        cell.style.background = gridData[r][c] || "#222";
+    }
+}
+
+// メイン描画
+function draw(){
+    if(isSpectating) return; // 観戦中はsocketからのデータで描画する
+
+    // リセット
+    for(let r=0;r<ROW;r++) for(let c=0;c<COL;c++){
+        const cell = document.getElementById(`cell-${r}-${c}`);
+        cell.className = "cell";
+        cell.style.background = field[r][c] || "#222";
+    }
+
+    if(!isPlaying) return;
+
+    // ゴースト
+    const ghostRow = getGhostRow(cur);
+    for(let r=0;r<cur.shape.length;r++) for(let c=0;c<cur.shape[0].length;c++){
+        if(cur.shape[r][c]){
+             const cell=document.getElementById(`cell-${ghostRow+r}-${cur.col+c}`);
+             if(ghostRow+r !== cur.row+r || cur.col+c !== cur.col+c) cell.classList.add("ghost");
+        }
+    }
+
+    // 現在ミノ
+    for(let r=0;r<cur.shape.length;r++) for(let c=0;c<cur.shape[0].length;c++){
+        if(cur.shape[r][c]){
+            const cell=document.getElementById(`cell-${cur.row+r}-${cur.col+c}`);
+            cell.classList.remove("ghost");
+            cell.style.background = COLORS[cur.type];
+        }
+    }
+
+    // HOLD & NEXT
+    drawMini(holdBox, hold);
+    drawMini(document.getElementById("next1"), nextQueue[0]);
+    drawMini(document.getElementById("next2"), nextQueue[1]);
+    drawMini(document.getElementById("next3"), nextQueue[2]);
+}
+
+function drawMini(container, tetro){
+    container.innerHTML="";
+    for(let i=0;i<16;i++) container.appendChild(Object.assign(document.createElement("div"),{className:"mini"}));
+    if(!tetro) return;
+    const sh=tetro.shape;
+    for(let r=0;r<sh.length;r++) for(let c=0;c<sh[0].length;c++){
+        if(sh[r][c]) container.children[r*4+c].style.background = COLORS[tetro.type];
+    }
+}
+
+function gameLoop(){
+    if(!isPlaying) return;
+    if(!collision({...cur, row:cur.row+1})) cur.row++;
+    else lock();
+    draw();
+}
+
+// キー操作
+document.addEventListener("keydown",e=>{
+    if(!isPlaying || isSpectating) return;
+    if(e.key==="ArrowLeft"){ if(!collision({...cur, col:cur.col-1})) cur.col--; }
+    if(e.key==="ArrowRight"){ if(!collision({...cur, col:cur.col+1})) cur.col++; }
+    if(e.key==="ArrowDown"){ if(!collision({...cur, row:cur.row+1})) cur.row++; }
+    if(e.key===" "){ 
+        cur.row = getGhostRow(cur); 
+        lock(); 
+    }
+    if(e.key==="ArrowUp" || e.key==="x"){
+        const rot = rotate(cur.shape,1);
+        if(!collision({...cur, shape:rot})) cur.shape=rot;
+    }
+    if(e.key==="z"){
+         if(!holdUsed){
+            if(!hold){
+                hold = {type:cur.type, shape:TETROS[cur.type].map(r=>[...r])};
+                cur = nextQueue.shift();
+                nextQueue.push(getNext());
+            } else {
+                const tmp={type:cur.type, shape:cur.shape};
+                cur = {type:hold.type, shape:hold.shape.map(r=>[...r]), row:0, col:3};
+                hold = {type:tmp.type, shape:TETROS[tmp.type].map(r=>[...r])};
+            }
+            cur.row=0; cur.col=3; holdUsed=true;
+         }
+    }
+    draw();
+});
+</script>
+</body>
+</html>
